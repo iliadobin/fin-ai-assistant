@@ -1,10 +1,12 @@
-import pandas as pd
-import numpy as np
 from openai import OpenAI
 from tqdm import tqdm
 from dotenv import load_dotenv
 import os
-import pickle
+
+# Импортируем модули проекта
+from data_loader import load_data
+from embeddings import load_or_create_embeddings
+from search import find_most_relevant_article
 
 # Подключаем все переменные из окружения
 load_dotenv()
@@ -13,6 +15,12 @@ load_dotenv()
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 EMBEDDER_API_KEY = os.getenv("EMBEDDER_API_KEY")
 
+# Проверяем загрузку ключей
+if not EMBEDDER_API_KEY:
+    raise ValueError("EMBEDDER_API_KEY не найден в .env файле! Добавьте строку: EMBEDDER_API_KEY=sk-0y14H33guZQVnRZFVE6BzQ")
+if not LLM_API_KEY:
+    raise ValueError("LLM_API_KEY не найден в .env файле!")
+
 # Константы
 EMBEDDINGS_FILE = "embeddings.pkl"
 TRAIN_DATA_FILE = "./train_data.csv"
@@ -20,39 +28,101 @@ QUESTIONS_FILE = "./questions.csv"
 OUTPUT_FILE = "submission.csv"
 
 
-def load_data():
+def answer_generation(question, article_text, api_key):
     """
-    Загружает данные из CSV файлов.
+    Генерирует ответ на вопрос на основе релевантной статьи (RAG подход).
     
+    Args:
+        question (str): Вопрос пользователя
+        article_text (str): Текст релевантной статьи для контекста
+        api_key (str): API ключ для LLM модели
+        
     Returns:
-        tuple: (train_data DataFrame, questions DataFrame)
+        str: Сгенерированный ответ
     """
-    print("Загрузка данных...")
+    # Подключаемся к LLM модели
+    client = OpenAI(
+        base_url="https://ai-for-finance-hack.up.railway.app/",
+        api_key=api_key,
+    )
     
-    # Загружаем базу знаний (финансовые статьи)
-    train_data = pd.read_csv(TRAIN_DATA_FILE)
-    print(f"Загружено статей: {len(train_data)}")
-    print(f"Колонки в train_data: {train_data.columns.tolist()}")
+    # Формируем промпт с контекстом статьи
+    prompt = f"""Ты - финансовый AI-ассистент банка. Твоя задача - давать точные и грамотные ответы на вопросы клиентов о финансовых инструментах и услугах.
+
+Используй ТОЛЬКО информацию из предоставленной статьи для ответа. Не добавляй информацию, которой нет в статье.
+
+СТАТЬЯ:
+{article_text}
+
+ВОПРОС КЛИЕНТА:
+{question}
+
+Дай четкий, профессиональный и понятный ответ на русском языке. Ответ должен быть информативным, но кратким (2-4 предложения)."""
+
+    # Формируем запрос к LLM
+    response = client.chat.completions.create(
+        model="openrouter/mistralai/mistral-small-3.2-24b-instruct",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    )
     
-    # Загружаем вопросы
-    questions = pd.read_csv(QUESTIONS_FILE)
-    print(f"Загружено вопросов: {len(questions)}")
-    print(f"Колонки в questions: {questions.columns.tolist()}")
-    
-    return train_data, questions
+    # Возвращаем сгенерированный ответ
+    return response.choices[0].message.content
 
 
 if __name__ == "__main__":
-    # Тестовая загрузка данных
-    train_data, questions = load_data()
+    print("\n" + "="*80)
+    print("ФИНАНСОВЫЙ AI-АССИСТЕНТ - RAG система")
+    print("="*80 + "\n")
     
-    # Выводим примеры для проверки
-    print("\n=== Пример статьи ===")
-    print(f"ID: {train_data.iloc[0]['id']}")
-    print(f"Аннотация: {train_data.iloc[0]['annotation'][:200]}...")
-    print(f"Длина текста: {len(train_data.iloc[0]['text'])} символов")
+    # Шаг 1: Загружаем данные
+    print("📂 Шаг 1/4: Загрузка данных...")
+    train_data, questions = load_data(TRAIN_DATA_FILE, QUESTIONS_FILE)
     
-    print("\n=== Пример вопроса ===")
-    print(f"ID: {questions.iloc[0]['ID вопроса']}")
-    print(f"Вопрос: {questions.iloc[0]['Вопрос']}")
+    # Шаг 2: Создаем/загружаем embeddings для всех статей
+    print("\n🔢 Шаг 2/4: Подготовка embeddings...")
+    article_embeddings = load_or_create_embeddings(train_data, EMBEDDINGS_FILE, EMBEDDER_API_KEY)
+    
+    # Шаг 3: Обрабатываем все вопросы
+    print(f"\n🤖 Шаг 3/4: Генерация ответов на {len(questions)} вопросов...")
+    print("(это займет ~15-20 минут)\n")
+    
+    answer_list = []
+    
+    for idx, row in tqdm(questions.iterrows(), total=len(questions), desc="Обработка вопросов"):
+        current_question = row['Вопрос']
+        
+        # Находим наиболее релевантную статью
+        relevant_article = find_most_relevant_article(
+            current_question,
+            train_data,
+            article_embeddings,
+            EMBEDDER_API_KEY
+        )
+        
+        # Генерируем ответ на основе найденной статьи
+        answer = answer_generation(
+            current_question,
+            relevant_article['text'],
+            LLM_API_KEY
+        )
+        
+        answer_list.append(answer)
+    
+    # Шаг 4: Сохраняем результаты
+    print("\n💾 Шаг 4/4: Сохранение результатов...")
+    questions['Ответы на вопрос'] = answer_list
+    questions.to_csv(OUTPUT_FILE, index=False)
+    
+    print(f"\n✅ Готово! Результаты сохранены в {OUTPUT_FILE}")
+    print("="*80)
 
