@@ -249,7 +249,7 @@ pip install -r requirements.txt
 Создать файл `.env` в корне проекта:
 
 ```env
-EMBEDDER_API_KEY=sk-0y14H33guZQVnRZFVE6BzQ
+EMBEDDER_API_KEY=ваш_ключ_здесь
 LLM_API_KEY=ваш_ключ_здесь
 ```
 
